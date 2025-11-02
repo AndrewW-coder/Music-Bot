@@ -64,7 +64,7 @@ async def async_download(url: str):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, download_audio, url)
 
-# - - - Bot Commands - - - #
+# bot commands
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -78,12 +78,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Send a song name → I’ll show you top 5 results with thumbnails and buttons."
     )
 
-# --- Handle Messages ---
+# handling messages
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text: str = update.message.text.strip()
 
-    # Direct YouTube link
+    # youtube links
     if "youtube.com" in text or "youtu.be" in text:
         status_msg = await update.message.reply_text("🎵 Downloading, please wait...")
         try:
@@ -109,7 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = []
 
     # Send each search result with thumbnail + button
-        # Send each search result with thumbnail + button
+        
     for i, video in enumerate(results):
         duration_sec = video.get("duration")
         duration = format_duration(duration_sec)
@@ -147,7 +147,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     search_result_msgs[update.message.chat_id] = messages
 
-# --- Handle Button Press ---
+#button presses
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -166,7 +166,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = search_results[chat_id][choice]
     url = video["url"]
 
-    # Temporary "Downloading..." message
+    # downloading messages
     status_msg = await context.bot.send_message(chat_id=chat_id, text=f"🎵 Downloading: {video['title']}")
 
     try:
@@ -193,13 +193,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_results.pop(chat_id, None)
     search_result_msgs.pop(chat_id, None)
 
-# --- Error Handler ---
 
+# error handler
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Update: {update} caused error {context.error}")
 
-# --- Main ---
-
+#running
 if __name__ == "__main__":
     print("Starting Bot...")
     app = Application.builder().token(TOKEN).build()
