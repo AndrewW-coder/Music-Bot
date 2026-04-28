@@ -1,6 +1,9 @@
+from multiprocessing import context
 import os
+from turtle import update
 import yt_dlp
 import asyncio
+import time
 
 from dotenv import load_dotenv
 from typing import Final
@@ -53,6 +56,7 @@ def download_audio(url: str):
         "outtmpl": "%(title)s.%(ext)s",
         "quiet": True,
         "noplaylist": True,
+        "max_filesize": 20 * 1024 * 1024,  # 20MB limit
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -86,17 +90,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # youtube links
     if "youtube.com" in text or "youtu.be" in text:
         status_msg = await update.message.reply_text("🎵 Downloading, please wait...")
+
+        file_path = None
         try:
             file_path, title = await async_download(text)
-            await update.message.reply_audio(audio=open(file_path, "rb"), title=title)
-            os.remove(file_path)
+
+            with open(file_path, "rb") as f:
+                await update.message.reply_audio(audio=f, title=title)
+
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
+
         finally:
+            # delete status message
             try:
                 await status_msg.delete()
             except:
                 pass
+
+            # delete file safely
+            if file_path and os.path.exists(file_path):
+                for _ in range(3):
+                    try:
+                        os.remove(file_path)
+                        break
+                    except PermissionError:
+                        import time
+                        time.sleep(1)
+
         return
 
     # Search YouTube
@@ -108,17 +129,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_results[update.message.chat_id] = results
     messages = []
 
-    # Send each search result with thumbnail + button
-        
     for i, video in enumerate(results):
         duration_sec = video.get("duration")
         duration = format_duration(duration_sec)
 
-        # Safer thumbnail selection
         thumbnail_url = None
         if video.get("thumbnails"):
             for t in video["thumbnails"]:
-                if t.get("url", "").endswith(".jpg"):  # prefer jpg images
+                if t.get("url", "").endswith(".jpg"):
                     thumbnail_url = t["url"]
                     break
 
@@ -136,14 +154,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 raise Exception("No valid thumbnail")
         except:
-            # Fallback to text if photo fails
             msg = await update.message.reply_text(
                 text=caption,
                 reply_markup=reply_markup
             )
 
         messages.append(msg.message_id)
-
 
     search_result_msgs[update.message.chat_id] = messages
 
@@ -166,15 +182,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = search_results[chat_id][choice]
     url = video["url"]
 
-    # downloading messages
-    status_msg = await context.bot.send_message(chat_id=chat_id, text=f"🎵 Downloading: {video['title']}")
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎵 Downloading: {video['title']}"
+    )
 
+    file_path = None
     try:
         file_path, title = await async_download(url)
-        await context.bot.send_audio(chat_id=chat_id, audio=open(file_path, "rb"), title=title)
-        os.remove(file_path)
+
+        with open(file_path, "rb") as f:
+            await context.bot.send_audio(chat_id=chat_id, audio=f, title=title)
+
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Error: {e}")
+
     finally:
         # delete "Downloading..." message
         try:
@@ -182,17 +204,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-        # delete all search result messages
+        # delete search result messages
         for msg_id in search_result_msgs.get(chat_id, []):
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except:
                 pass
 
-    # Clean up
+        # delete file safely
+        if file_path and os.path.exists(file_path):
+            for _ in range(3):
+                try:
+                    os.remove(file_path)
+                    break
+                except PermissionError:
+                    import time
+                    time.sleep(1)
+
+    # Clean up memory
     search_results.pop(chat_id, None)
     search_result_msgs.pop(chat_id, None)
-
 
 # error handler
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,7 +232,14 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #running
 if __name__ == "__main__":
     print("Starting Bot...")
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(60)
+        .read_timeout(60)
+        .write_timeout(60)
+        .build()
+    )
 
     # Commands
     app.add_handler(CommandHandler("start", start_command))
