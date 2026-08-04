@@ -5,7 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Final
+from typing import Final, Optional
 
 import yt_dlp
 from dotenv import load_dotenv
@@ -61,6 +61,7 @@ executor = ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS)
 # Per-chat in-memory state (fine for a single user — one entry, never grows)
 search_results: dict[int, list] = {}
 search_result_msgs: dict[int, list[int]] = {}
+search_query_msgs: dict[int, int] = {}  # chat_id -> message_id of the text that started the search
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +190,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _reject_if_not_owner(update):
         return
 
+    chat_id = update.message.chat_id
     text: str = update.message.text.strip()
 
     if "youtube.com" in text or "youtu.be" in text:
-        await _download_and_send(update.message.chat_id, text, update.message)
+        # The link message itself is what we'll delete on success.
+        await _download_and_send(
+            chat_id, text, update.message, delete_message_id=update.message.message_id
+        )
         return
 
     try:
@@ -207,7 +212,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Overwrite any previous search for this chat — no unbounded growth.
-    search_results[update.message.chat_id] = results
+    search_results[chat_id] = results
+    search_query_msgs[chat_id] = update.message.message_id
     messages = []
 
     for i, video in enumerate(results):
@@ -230,7 +236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages.append(msg.message_id)
 
-    search_result_msgs[update.message.chat_id] = messages
+    search_result_msgs[chat_id] = messages
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,16 +261,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await context.bot.send_message(chat_id=chat_id, text=f"🎵 Downloading: {video['title']}")
 
-    await _download_and_send(chat_id, url, status_msg, context.bot, delete_search_ui=True)
+    # Also clean up the original song-name text that kicked off this search.
+    query_msg_id = search_query_msgs.pop(chat_id, None)
+
+    await _download_and_send(
+        chat_id,
+        url,
+        status_msg,
+        context.bot,
+        delete_search_ui=True,
+        delete_message_id=query_msg_id,
+    )
 
 
-async def _download_and_send(chat_id, url, status_or_message, bot=None, delete_search_ui=False):
+async def _download_and_send(
+    chat_id,
+    url,
+    status_or_message,
+    bot=None,
+    delete_search_ui=False,
+    delete_message_id: Optional[int] = None,
+):
     """
     Shared download+send+cleanup path used by both direct-link messages and
     button selections, so there's exactly one place that has to get file
     cleanup right.
+
+    delete_message_id: if the download succeeds, this message (the link or
+    song-name text that triggered it) is deleted to keep the chat tidy. Left
+    alone on failure so you can see what happened / retry.
     """
     file_path = None
+    success = False
     try:
         file_path, title = await async_download(url)
         with open(file_path, "rb") as f:
@@ -272,6 +300,7 @@ async def _download_and_send(chat_id, url, status_or_message, bot=None, delete_s
                 await bot.send_audio(chat_id=chat_id, audio=f, title=title)
             else:
                 await status_or_message.reply_audio(audio=f, title=title)
+        success = True
     except yt_dlp.utils.DownloadError as e:
         msg = f"❌ Couldn't download that (too long, too large, or unavailable): {e}"
         if bot:
@@ -302,6 +331,14 @@ async def _download_and_send(chat_id, url, status_or_message, bot=None, delete_s
             search_result_msgs.pop(chat_id, None)
 
         cleanup_download(file_path)
+
+    if success and delete_message_id is not None:
+        bot_obj = bot or status_or_message.get_bot()
+        try:
+            await bot_obj.delete_message(chat_id=chat_id, message_id=delete_message_id)
+        except Exception:
+            # Most likely cause: message is older than Telegram's 48h delete window.
+            logger.warning("Could not delete message %s in chat %s", delete_message_id, chat_id)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
